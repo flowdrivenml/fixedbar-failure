@@ -1,12 +1,20 @@
 ## ⚠️ WARNING
 
-This is a **deprecated experimental project**.
+This repository is an **experimental toy project**.
 
-It does not survive real-world ML training requirements and should not be used for production, research, or strategy development.
+It aggregates crypto market data (order books, trades, liquidations, open interest by depth levels), but **did not hold up in real production settings**, especially for machine learning training workflows.
 
-Fixed time horizons proved fundamentally incompatible with robust ML-based trading systems. Event-driven pipelines operating on raw ticks are significantly more practical.
+Through experimentation, it became clear that **fixed time-horizon aggregations are poorly suited for ML-driven trading systems**. Issues around information leakage, regime dependency, and data inefficiency make this approach impractical at scale.
 
-This repository is kept for reference only and is **effectively useless** for serious applications.
+As a result, this project should be considered **educational only**.
+
+If you are looking for a practical alternative, see:
+👉 https://github.com/IndianaBug/mini-fintickstreams
+
+That project is written in **Rust** and focuses on **raw tick ingestion into a database**, enabling event-driven feature construction and research pipelines that better align with real ML behavior in markets.
+
+**In short:**  
+This repository is **very likely useless for serious ML or production use**.
 
 
 
