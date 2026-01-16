@@ -1,3 +1,15 @@
+## ⚠️ WARNING
+
+This is a **deprecated experimental project**.
+
+It does not survive real-world ML training requirements and should not be used for production, research, or strategy development.
+
+Fixed time horizons proved fundamentally incompatible with robust ML-based trading systems. Event-driven pipelines operating on raw ticks are significantly more practical.
+
+This repository is kept for reference only and is **effectively useless** for serious applications.
+
+
+
 # moonStreamProcess Library
 
 ## Overview
