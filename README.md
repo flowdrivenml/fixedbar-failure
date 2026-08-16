@@ -1,388 +1,1496 @@
-## ⚠️ WARNING
+# Crypto Market Data Aggregation Lab
 
-This repository is an **experimental toy project**.
+> [!IMPORTANT]
+> This project is intentionally preserved as an **engineering experiment and postmortem**.
+>
+> The main conclusion was simple:
+>
+> **Fixed-time bars are a poor default representation for machine-learning models on market data.**
+>
+> A quiet one-minute bar and an extremely active one-minute bar both become exactly one training sample, even though they contain completely different amounts of information.
+>
+> That inconsistency makes the statistical meaning of each sample unstable and encourages models to overfit to market regimes, volatility conditions, and arbitrary clock boundaries instead of learning robust relationships.
+>
+> The project still turned out to be useful because it forced me to understand market-data normalization, feature engineering, streaming architecture, data leakage, replayability, and eventually why the ingestion layer should not have been built around pandas and fixed aggregations in the first place.
 
-It aggregates crypto market data (order books, trades, liquidations, open interest by depth levels), but **did not hold up in real production settings**, especially for machine learning training workflows.
+---
 
-Through experimentation, it became clear that **fixed time-horizon aggregations are poorly suited for ML-driven trading systems**. Issues around information leakage, regime dependency, and data inefficiency make this approach impractical at scale.
+## Quick Navigation
 
-As a result, this project should be considered **educational only**.
+- [[#What This Project Was]]
+- [[#The Main Problem With Fixed-Time Bars]]
+- [[#What the System Produced]]
+- [[#Architecture]]
+- [[#Technology Used]]
+- [[#Feature Engineering]]
+- [[#How the Processing Worked]]
+- [[#What Worked]]
+- [[#Why the Project Failed]]
+- [[#Problems With the Features]]
+- [[#Why the ML Representation Was Weak]]
+- [[#Why Python Became the Wrong Tool for the Hot Path]]
+- [[#What I Learned]]
+- [[#Better Architecture]]
+- [[#Successor Project]]
+- [[#Repository Structure]]
+- [[#Current Status]]
 
-If you are looking for a practical alternative, see:
-👉 https://github.com/IndianaBug/mini-fintickstreams
+---
 
-That project is written in **Rust** and focuses on **raw tick ingestion into a database**, enabling event-driven feature construction and research pipelines that better align with real ML behavior in markets.
+## What This Project Was
 
-**In short:**  
-This repository is **very likely useless for serious ML or production use**.
+This project was an experimental Python system for combining crypto market data from multiple exchanges into one normalized representation.
 
+The basic idea was:
 
+```text
+many exchanges
+    ↓
+different native payloads
+    ↓
+normalize everything
+    ↓
+aggregate market activity
+    ↓
+build one unified feature set
+```
 
-# moonStreamProcess Library
+The system processed data such as:
 
-## Overview
-The moonStreamProcess Library is a powerhouse designed to seamlessly process and aggregate real-time financial data streams. It ingests critical market data like order books, trades, liquidations, open interest, and positions, transforming them into actionable insights and a unified view of the market.
+- order books;
+- trades;
+- liquidations;
+- open interest;
+- funding rates;
+- trader positioning ratios;
+- options open interest.
 
-## Purpouse
-While moonStreamProcess does not directly generate financial dashboards, its core functionality revolves around aggregating data from various exchanges and providing meticulous one-minute summaries in the form of heatmaps. These heatmaps offer a detailed visualization of market dynamics. moonStreamProcess's role is pivotal in efficiently aggregating and synthesizing this heatmap data, making it an indispensable tool for traders and analysts seeking real-time insights into market trends. Additionally, it proves invaluable for storing data in non-relational databases, supporting the development of machine learning algorithms, and facilitating the execution of complex analyses
+The target was mainly Bitcoin spot, perpetuals, and options.
 
-## Core Functionality: Stream Processing Redefined
-moonStreamProcess excels at real-time financial data processing. Here's how it breaks down:
-* Modular Design: The library utilizes specialized flow modules as building blocks. Each module meticulously handles a specific data type within the financial stream.
-* Stream Aggregation & Synthesis: After the flow modules refine the data, synthesis modules take over. These modules not only consolidate the processed information but also synthesize it into actionable insights, providing a comprehensive market picture.
-
-## Supported Instruments
-
-moonStreamProcess currently supports only Bitcoin. However, creating processors for ETH or any other altcoin shouldn't take much time. The crucial steps are only to change lookups for the data based on the websocket or API you are using and remove unneeded instruments. To get started, follow the instructions provided in the section on making your own streams.
-
-## Supported Exchanges
-
-moonStreamProcess currently supports the following exchanges for spot/perpetual instruments:
+Adapters were created for exchanges including:
 
 - Binance
 - OKX
 - Bybit
+- Bitget
+- BingX
 - KuCoin
 - Deribit
-- MXC
-- Gate.io
-- BingX
-- Bitget
 - Coinbase
 - HTX
+- Gate.io
+- MEXC
 
-Additionally, for option instruments, moonStreamProcess supports:
+The project was not a trading bot and did not place orders.
 
-- Bybit
-- Deribit
-- OKX
+It was essentially a **market-data normalization and feature-engineering engine**.
 
-## Important Notes
+---
 
-### Deribit Open Interest
+## The Main Problem With Fixed-Time Bars
 
-**Caution:** Deribit's Open Interest (OI) values of BTC-PERP may exhibit unusual and abrupt jumps. This behavior could potentially be attributed to API errors. Please use TradeStreamEngine with Deribit on your own risk, and exercise caution when interpreting OI data.
+This became the most important finding from the project.
 
-### MEXC API Support
+The system aggregated market activity into fixed one-minute windows.
 
-**Attention:** MEXC's API support is reported to have challenges. If you intend to use MEXC data, it is advisable to verify the accuracy of the information. Ensure that the data is not manipulated, as reported Open Interest (OI) values fetched via the API may differ significantly from those reported by external sources such as CoinMarketCap.
+That sounds reasonable at first.
 
-**Additional Note on MEXC Perpetual BTCUSDT Books**
+The problem is that **time does not correspond to a fixed amount of market information**.
 
-**Caution:** The order books for MEXC perpetual BTCUSDT contracts may display unusually high values. This anomaly could be a result of the unregulated nature of the market. Exercise discretion and be aware of potential discrepancies when analyzing MEXC perpetual BTCUSDT books.
+Consider two different minutes:
 
+```text
+Minute A
+-------
+200 trades
+small order-book changes
+almost no liquidations
+low volatility
 
-# Table of Contents
+Minute B
+-------
+25,000 trades
+massive order-book movement
+large liquidations
+open-interest shock
+extreme volatility
+```
 
-- [Installation](#installation)
-- [Usage](#usage)
-- [Data](#data)
-- [Interpretation](#interpretation)
-- [Making Streams](#modules)
-  - [Flow Modules](#flow-modules)
-  - [Lookups Modules](#lookups-modules)
-  - [Synthesis Modules](#synthesis-modules)
-  - [Assembler Modules](#assembler-modules)
-- [Examples](#examples)
-- [Contacts](#contacts)
-- [Licence and Contributing](#license-and-contributing)
-- [Support Development](#support-development)
+Both become:
 
-# Installation
+```text
+1 row
+```
 
-To use the moonStreamProcess and its modules, follow these installation steps:
+from the perspective of a machine-learning dataset.
 
-1. Clone the repository to your virtual environment library directory:
-   ```bash
-   git clone https://github.com/badcoder-cloud/moonStreamProcess
-2. Navigate to the project directory:
-   ```bash
-   cd .../moonStreamProcess
-3. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
+That is a major statistical problem.
 
-# Usage
+### Different rows represent different amounts of information
 
-To use the Synthesis Hub with Bitcoin data, follow these steps:
-For Python code:
+In a normal tabular ML dataset, there is usually an implicit assumption that observations are at least somewhat comparable.
+
+With fixed-time market bars, that assumption becomes weak.
+
+One row may summarize almost nothing.
+
+Another row may compress thousands of economically meaningful events.
+
+The model is therefore trained on samples with radically different information content.
+
+---
+
+### Fixed-time bars encourage regime overfitting
+
+Market activity changes constantly.
+
+A one-minute representation behaves differently during:
+
+- low volatility;
+- high volatility;
+- news events;
+- liquidations;
+- weekends;
+- US market hours;
+- Asian market hours;
+- trending markets;
+- mean-reverting markets.
+
+The same features can have completely different distributions across these regimes.
+
+A model can easily learn something like:
+
+```text
+high activity + certain volatility structure
+    ↓
+usually happened during regime X
+    ↓
+predict regime X behavior
+```
+
+instead of learning something genuinely stable about the market.
+
+This creates strong **regime dependency**.
+
+The model performs well while the regime resembles the training data and then collapses when the market changes.
+
+---
+
+### Clock boundaries are arbitrary
+
+Markets do not care that the clock changed from:
+
+```text
+12:34:59
+```
+
+to:
+
+```text
+12:35:00
+```
+
+But a fixed-time bar system treats that as a hard information boundary.
+
+A large market event can easily be split across two bars:
+
+```text
+event begins
+12:34:58
+
+event continues
+12:35:00
+
+event ends
+12:35:04
+```
+
+The feature engine then represents one coherent event as two unrelated training samples.
+
+That makes the representation dependent on an arbitrary clock boundary.
+
+---
+
+### Information density changes constantly
+
+The better mental model is:
+
+```text
+clock time != information time
+```
+
+For machine learning, it can be much more useful to sample based on actual market activity.
+
+Examples include:
+
+- tick bars;
+- volume bars;
+- dollar bars;
+- imbalance bars;
+- volatility-triggered events;
+- custom event-driven windows.
+
+These approaches attempt to create samples containing more comparable amounts of market activity.
+
+They are not automatically better for every problem, but they avoid one of the major weaknesses of purely fixed-time sampling.
+
+---
+
+## What the System Produced
+
+The project generated unified market features across spot, perpetual, and options markets.
+
+### Spot features
+
+The spot pipeline produced features such as:
+
+- aggregated order-book depth;
+- buy volume;
+- sell volume;
+- open;
+- close;
+- high;
+- low;
+- realized volatility;
+- buy trade count;
+- sell trade count;
+- volume profile;
+- buy volume profile;
+- sell volume profile.
+
+---
+
+### Perpetual features
+
+The perpetual pipeline included:
+
+- order-book depth;
+- trades;
+- open interest;
+- funding rates;
+- liquidations;
+- trader long/short ratios;
+- open-interest changes;
+- open-interest volatility;
+- liquidation profiles;
+- aggregated cross-exchange positioning.
+
+---
+
+### Options features
+
+Options open interest was grouped by:
+
+- strike distance from current BTC price;
+- option side;
+- time to expiration.
+
+For example:
+
+```text
+puts
+    0–1% below price
+    1–2% below price
+    2–5% below price
+
+calls
+    0–1% above price
+    1–2% above price
+    2–5% above price
+```
+
+and then additionally separated by expiration windows.
+
+This produced a rough representation of where option interest was concentrated around the current market price.
+
+---
+
+## Architecture
+
+The original processing pipeline looked roughly like this:
+
+```text
+Recorded JSON / external API collector
+                    │
+                    ▼
+            Exchange adapters
+     parsing · timestamps · units
+                    │
+                    ▼
+             Flow processors
+ books · trades · OI · funding · liquidations
+                    │
+                    ▼
+       per-second temporary DataFrames
+                    │
+                    ▼
+       fixed one-minute aggregation
+                    │
+                    ▼
+         cross-exchange synthesis
+                    │
+                    ▼
+         flattened feature dictionary
+```
+
+The architecture was modular, but the main architectural mistake was performing irreversible aggregation too early.
+
+---
+
+## Technology Used
+
+### Python
+
+Python handled the overall system structure.
+
+It was used for:
+
+- exchange adapters;
+- flow processors;
+- feature generation;
+- orchestration;
+- aggregation;
+- testing with recorded data.
+
+For a research prototype, Python was extremely productive.
+
+---
+
+### NumPy
+
+NumPy was used heavily for:
+
+- price-level calculation;
+- bucket assignment;
+- unique level detection;
+- grouped sums;
+- array transformations;
+- fast numerical operations.
+
+Example conceptually:
 
 ```python
-import numpy as np
-from moonStreamProcess.StreamEngine.synthHub import btcSynth
+unique_levels, inverse_indices = np.unique(
+    levels,
+    return_inverse=True
+)
 
+group_sums = np.bincount(
+    inverse_indices,
+    weights=amounts
+)
+```
+
+This made price-bucket aggregation relatively straightforward.
+
+---
+
+### pandas
+
+pandas handled most temporary time-series structures.
+
+It was used for:
+
+- 60-row second-level matrices;
+- merging exchanges;
+- forward filling;
+- backward filling;
+- volatility calculations;
+- order-book heatmaps;
+- trade profiles;
+- open-interest aggregation.
+
+It made experimentation easy, but eventually became one of the main performance problems.
+
+---
+
+### JSON
+
+Recorded exchange responses were stored as JSON and replayed into the processors.
+
+This allowed feature logic to be tested without constantly reconnecting to live exchange APIs.
+
+---
+
+### Jupyter
+
+Jupyter notebooks were used to inspect:
+
+- DataFrames;
+- generated features;
+- heatmaps;
+- strange exchange values;
+- normalization errors.
+
+---
+
+## Feature Engineering
+
+A major part of the project was experimenting with derived market features.
+
+The idea was not only to store raw exchange values but to generate representations that might be useful for later statistical modelling.
+
+---
+
+### Price-level aggregation
+
+Order books and trades were grouped into configurable price buckets.
+
+For example:
+
+```text
 level_size = 20
-prage = np.array([0.0, 1.0, 2.0, 5.0, 10.0])
-expiration_ranges = np.array([0.0, 1.0, 2.0, 5.0, 10.0])
-exchanges_spot_perp = ["binance", "okx", "bybit", "bitget", "bingx", "kucoin", "deribit", "coinbase", "htx", "gateio", "mexc"]
-exchanges_option = ["bybit", "okx", "deribit"]
-abs_path = "" # Absolut path to the directory containing json files. Read method docs
-
-btcDataProcessor = btcSynth(level_size, prage, expiration_ranges, exchanges_spot_perp=exchanges_spot_perp, exchanges_option=exchanges_option)
-btcDataProcessor.input_from_json(abs_path) # For testing purpouses to load all of the data at once.
-                                           # You may want to fork the code and input the data from unrelational database
-btcDataProcessor.merge()
-btcDataProcessor.display_full_data()
-
-data = ""
-btcDataProcessor.add_okx_perp_btcusd_oi(data) # Will input okx oi. Check for all methods
 ```
 
-**Level Size** 
+could create buckets conceptually like:
 
-Imagine you're sorting coins. Instead of having a giant pile, this setting groups similar prices together. The "level size" determines the size of these groups. If it's set to 20, then order book and trade, ois and liquidations data will be grouped into buckets that represent price ranges of $20 each.
-
-**Price Ranges for Options (pranges)**
-
-This setting focuses on option contracts, which give you the right to buy or sell Bitcoin at a specific price by a certain date (expiration). pranges helps categorize options based on their strike price, which is the price at which you can exercise the option to buy or sell.
-
-The example np.array([0.0, 1.0, 2.0, 5.0, 10.0]) creates buckets for options relative to the current Bitcoin price:
-
-10.0: This bucket holds options with a strike price that matches the strikes 10% above the current Bitcoin price (or below if the value is negative). For example if the current price is $10,000, the bucket will encomapass options with strikes above $11,000
-0.0:1.0, 1.0:2.0, and so on: These buckets hold options with strike prices that fall within the specified range relative to the current price. For example, if the current price is $10,000, a 1.0:2.0 bucket might encompass options with strike prices between $10,200 and $10,400. It's important to note that negative values, such as -5 and -10, represent options with strike prices below the current price.
-
-**Expiration Time Ranges (expiration_ranges)**
-
-Similar to price ranges, this setting groups options based on how much time is left until they expire. This helps analyze how option prices change as the expiration date approaches. (Doesn't contain negative ranges)
-
-**In Short**
-
-These settings organize complex Bitcoin market data into simpler buckets, making it easier to understand price trends, option behavior based on strike price and expiration time, and ultimately gain valuable insights into the market.
-
-# Data
-This btcSynth contains dynamically generated data that serves various purposes within the project. It can be accessed with following methods:
-
-``` Python
-btcDataProcessor.data.get("spot_books") # to get spot books data
-btcDataProcessor.data                   # to access full data
-```
-The data can be categorized into the Spot, Perpetual and Option.
-
-### Spot Data
-| key | clarification |
-| -------- | -------- |
-| <span style="color:green">spot_books</span> | the dictionary of absolute amount of books by aggregated level. |
-| <span style="color:blue">timestamp</span> | Timestamp of the data. |
-| spot_buyVol | the total amount of market buys at the current timestamp. |
-| spot_sellVol | the total amount of market sells at the current timestamp. |
-| spot_open | the price at the beginning of the 1-minute interval. |
-| spot_close | the price at the end of the 1-minute interval. |
-| spot_low | the lowest price within a 1-minute interval. |
-| spot_high | the highest price within a 1-minute interval. |
-| spot_Vola | the volatility of the price within a 1-minute interval, calculated using standard deviation. |
-| spot_VolProfile | the dictionary of market trades (sell + buy) by aggregated level. |
-| spot_buyVolProfile | the dictionary of market buys by aggregated level. |
-| spot_sellVolProfile | the dictionary of market sells by aggregated level. |
-| spot_numberBuyTrades | number of buy trades at the current timestamp. |
-| spot_numberSellTrades | number of sell trades at the current timestamp. |
-| <span style="color:yellow">spot_orderedBuyTrades</span> | the list of ordered buy trades. (may be usefull for entropy) |
-| spot_orderedSellTrades | the list of ordered sell trades. |
-| spot_voids | the dictionary of canceled books by aggregated level. (sums all canceled amounts) |
-| spot_reinforces | the dictionary of reinforced books by aggregated level. (sums all reinforced amounts) |
-| spot_totalVoids | the total amount of canceled orders at the current timestamp. |
-| spot_totalReinforces | the total amount of reinforced orders at the current timestamp. |
-| spot_voidsDuration | the dictionary of duration of canceled books by aggregated level in seconds. If someone is engaging in spoofing, you can determine the duration for which they place an order before canceling it by measuring the time interval between order placement and cancellation. |
-| spot_voidsDurationVola | the dictionary of volatility of spot_voidsDuration. |
-| spot_reinforcesDuration | the dictionary of duration of reinforced books by aggregated level in seconds.|
-| spot_reinforcesDurationVola | the dictionary of volatility of spot_reinforcesDuration. |
-
-### Perpetual Data
-| key | clarification |
-| -------- | -------- |
-| perp_books | the dictionary of absolute amount of books by aggregated level |
-| perp_buyVol | the total amount of market buys at the current timestamp |
-| perp_sellVol | the total amount of market sells at the current timestamp |
-| perp_open | the price at the beginning of the 1-minute interval |
-| perp_close | the price at the end of the 1-minute interval |
-| perp_low | the lowest price within a 1-minute interval |
-| perp_high | the highest price within a 1-minute interval |
-| perp_Vola | the volatility of the price within a 1-minute interval, calculated using standard deviation |
-| perp_VolProfile | the dictionary of market trades (sell + buy) by aggregated level |
-| perp_buyVolProfile | the dictionary of market buys by aggregated level |
-| perp_sellVolProfile | the dictionary of market sells by aggregated level |
-| perp_numberBuyTrades | number of buy trades at the current timestamp |
-| perp_numberSellTrades | number of sell trades at the current timestamp |
-| perp_orderedBuyTrades | the list of ordered buy trades. (may be usefull for entropy) |
-| perp_orderedSellTrades | the list of ordered sell trades |
-| perp_voids | the dictionary of canceled books by aggregated level. (sums all canceled amounts) |
-| perp_reinforces | the dictionary of reinforced books by aggregated level. (sums all reinforced amounts) |
-| perp_totalVoids | the total amount of canceled orders at the current timestamp |
-| perp_totalReinforces | the total amount of reinforced orders at the current timestamp. |
-| perp_voidsDuration | the dictionary of duration of canceled books by aggregated level in seconds. If someone is engaging in spoofing, you can determine the duration for which they place an order before canceling it by measuring the time interval between order placement and cancellation. |
-| perp_voidsDurationVola | the dictionary of volatility of spot_voidsDuration. |
-| perp_reinforcesDuration | the dictionary of duration of reinforced books by aggregated level in seconds. |
-| perp_reinforcesDurationVola | the dictionary of volatility of spot_reinforcesDuration. |
-| perp_weighted_funding | weighted funding rate at the current timestamp. |
-| perp_total_oi | the total open interest at the current timestamp. |
-| perp_oi_increases | the dictionary of increases of open interest by aggregated level. |
-| perp_oi_increases_Vola | the dictionary of volatilities of increases of open interest by aggregated level. |
-| perp_oi_decreases | the dictionary of decreases of open interest by aggregated level.  |
-| perp_oi_decreases_Vola | the dictionary of volatilities of decreases of open interest by aggregated level. |
-| perp_oi_total | the dictionary of oi changes (buys-sells) by aggregated level. |
-| perp_oi_total_Vola | the dictionary of volatilities of perp_oi_total. | 
-| perp_oi_change | the change of open inerest at the current timestamp. |
-| perp_oi_Vola | the volatility of open interest at the current timestamp. |
-| perp_orderedOIChanges | the list of ordered OI changes. |
-| perp_OIs_per_instrument | the dictionary of open interest per instrument at the current timestamp. |
-| perp_fundings_per_instrument | the dictionary of funding rates per instrument at the current timestamp. |
-| perp_liquidations_longsTotal | the total amount of long liquidations at the current timestamp. |
-| perp_liquidations_longs | the dictionary of liquidations by aggregated level, longs. |
-| perp_liquidations_shortsTotal | the total amount of short liquidations at the current timestamp. |
-| perp_liquidations_shorts | the dictionary of liquidations by aggregated level, shorts. |
-| perp_TTA_ratio | weighted Long/Short ration of Top Traders Accounts |
-| perp_TTP_ratio | weighted Long/Short ration of Top Traders Positions |
-| perp_GTA_ratio | weighted Long/Short ration of Global Traders Positions |
-
-
-### Option Data (Keys depend on the pranges and expiration_windows)
-| key | clarification |
-| -------- | -------- |
-| oi_option_puts_0 | the dictionary of open interests of put options that expire today |
-| oi_option_puts_0_5 | the dictionary of open interests of put options that expire in 5 days |
-| oi_option_puts_5_10 | the dictionary of open interests of put options that expire between 5 to 10 days |
-| oi_option_calls_0 | the dictionary of open interests of call options that expire today |
-| oi_option_calls_0_5 | the dictionary of open interests of call options that expire in 5 days |
-| oi_option_calls_5_10 | the dictionary of open interests of call options that expire between 5 to 10 days |
-
-
-# Interpretation
-
-Methematical interpretation of the highlighted features:
-
-#### Books - absolute quantity of order books for certain price levels at certain timestamp.
-- $P_i$: The price level at index $i$.
-- $Q_i(t)$: The absolute quantity of limit orders at price level \( P_i \) at timestamp \( t \).
-- $B_t$ = ${(P_1, Q_1(t)), (P_2, Q_2(t)), ... , (P_n, Q_n(t))}$ : Books at different levels
-#### Trades - absolute quantity of market trades for certain price levels at certain timestamp.
-- $P_i$: The price level at index $i$.
-- $Q_i(t)$: The absolute quantity of market orders at price level \( P_i \) at timestamp \( t \).
-- $T_t$ = ${(P_1, Q_1(t)), (P_2, Q_2(t)), ... , (P_n, Q_n(t))}$ : Books at different levels
-#### Canceled limit orders - estimated quantity of canceled limit orders for certain price levels at certain timestamp.
-- $D_t$ = ${ (B_t1 + T_t1 ) - ( B_t0 + T_t0 ) }$   -Difference of total placed prders between 2 consegutive timestamps
-- $CB_t$ = ${CB_t | CB_t = (D_t - D_t-1) ⋅ [D_t - D_t-1 > 0], ∀_i, 0 ≤ i < n}$ - Total closed orders over a single timestamp 
-#### Reforced limit orders - estimated quantity of reforced limit orders for certain price levels at certain timestamp.
-- $D_t$ = ${ (B_t + T_t ) - ( B_t-1 + T_t-1 ) }$   -Difference of total placed prders between 2 consegutive timestamps
-- $CB_t$ = ${CB_t | CB_t = (D_t - D_t-1) ⋅ [D_t - D_t-1 < 0], ∀_i, 0 ≤ i < n}$ - Total closed orders over a single timestamp 
-
-The same logic applies to open interest and liquidations.
-All volatility metrics were calculated using standard deviation.
-
-# Making Streams
-
-StreamEngineBase has a set of modules to cater to your streaming needs, making the process straightforward. 
-
-## Lookups Modules
-
-The lookups module is crafted to convert various data into the required format and units. Depending on the API or websocket you're utilizing, you'll have to adjust the lookup according to your specific use case. Exercise caution, as different instruments use varying units of measure. For instance, while Binance measures order books in Bitcoin, Deribit uses dollars. In the provided lookups, note that the 'bingx btcusdt perp books' is intended for API calls, serving the same purpose as 'gateio btcusdt perp' for both books and trades. This is due to technical issues with the API. Also, look closely for the formats to input into flow objects.
-``` Python
-from lookups import btc as btc_lookups_btc
-from lookups import unit_conversion_btc
-lookups_btc = btc_lookups_btc(unit_conversion_btc)
-
-# or
-
-unit_conversion_btc = {
-    "binance_perp_btcusd" : lambda value, btc_price: value * 100 / btc_price,  
-    "bybit_perp_btcusd" :   lambda value, btc_price: value  / btc_price,      
-    "bybit_perp_btcusdt" :   lambda value, btc_price: value  / btc_price,
-    "bingx_perp_btcusdt_depth" : lambda size: size / 10000,  
-    "bingx_perp_btcusdt_OI" : lambda openInterest, price : openInterest / price,    
-    "deribit_perp_btcusd" : lambda size, price : size / price,
-    # ...
-}
-```
-Most of the lookups will be compatible with what you need. Be cautious with altcoins USD-C margined contracts, as these have different units for BTC and altcoins.
-
-## Flow Modules
-
-Flow modules are designed to handle books, trades, open interest, liquidations and positions of spot/perpetual instruments and open interest of option instruments.
-
-An example of using flow module:
-```Python
-from TradeStreamBase import flow
-
-books = flow.booksflow('binance', 'btc_usdt', 'perpetual', level_size, lookups_btc.binance_depth_lookup, book_ceil_thresh)
-trades = flow.tradesflow('binance', 'btc_usdt', 'perpetual', level_size, lookups_btc.binance_trades_lookup, book_ceil_thresh)
-oi = flow.oiFundingflow('binance', 'btc_usdt', 'perpetual', level_size, lookups_btc.binance_OI_lookup, book_ceil_thresh)
-liquidations = flow.booksflow('binance', 'btc_usdt', 'perpetual', level_size, lookups_btc.binance_depth_lookup, book_ceil_thresh)
-positions = flow.booksflow('binance', 'btc_usdt', 'perpetual', level_size, lookups_btc.binance_liquidations_lookup, book_ceil_thresh)
-oi_option = flow.indicatorflow('binance', 'btc_usdt', 'perpetual', "TTA", lookups_btc.binance_GTA_TTA_TTP_lookup)
-
-data = "some data"
-books.update_books(data)
-trades.input_trades(data)
-oi.input_oi(data)
-oi.input_funding(data)
-liquidations.input_liquidations(data)
-oi_option.input_binance_gta_tta_ttp(data) # this is different depending on exchange
-oi_option.input_oi(data)
+```text
+60000–60020
+60020–60040
+60040–60060
+...
 ```
 
-## Synthesis Modules
+This converts a very high-dimensional order book into a smaller structured representation.
 
-Synthesis module play a crucial role in the aggregation of data from various exchanges. These modules facilitate the consolidation of information, allowing for a unified and comprehensive view of data sourced from diverse trading platforms. By combining data from multiple exchanges, synthesis module contribute to a more holistic understanding of market trends, pricing, and other relevant factors. Not only it aggregates the data of liquidations, books, trades, open interest and positions, but it creates 2 new features, voided books and reinforced books.
-An example of using synthesis module:
-``` Python
-axis_spot = {
-    "binanceusdt" : bbt, # these are flow objects
-    "binancefdusd" : bbf,
-    "okxusdt" : obt,
-    "bybitusdt" : bybt,
-    "coinbaseusd" : cu,
-}
+Instead of tracking every individual price level, the system could reason about liquidity around approximate price regions.
 
-spotAggDepth = booksmerger("btcusd", "spot", axis_spot)
-spotAggDepth.merge_snapshots()
+---
 
-adjustments = synthesis.booksadjustments("btc", "spot", spotAggDepth, spotAggTrades)
+### Volume profiles
 
-# spotAggTrades not specified but follows the same logic
-# Inspect the module for more details
+Trades were aggregated by price level.
+
+This produced features such as:
+
+```text
+buy volume by level
+sell volume by level
+total volume by level
 ```
 
-## Assembler Modules
+Conceptually:
 
-Kindly examine the logic within the moonStreamProcess carefully and follow the flow. You won't need to fork the code entirely; instead, kindly replicate it and omit any unnecessary components. Should you encounter any bugs or difficulties, please feel free to reach out to me on Telegram. I would be more than happy to assist you in resolving them and guide you in creating your own streams.
+```text
+Price Level    Buy Volume    Sell Volume
+60000          12.4          8.1
+60020          20.2          18.6
+60040          7.4           22.5
+```
 
-Follow this logic:
+These profiles were designed to describe where actual market activity occurred.
 
-* Create the spot-perp coin object with your needed exchanges.
-* Create the option object if needed.
-* Create a new class in the Synth Hub, or create a new module.
+---
 
-# Examples
-Some examples can be found in the "examples" folder. Please make sure to examine the charts and look for any discrepancies. If you find outliers in the data, then you may have made a mistake with the lookups.
+### Order-book heatmaps
 
+The system also aggregated displayed liquidity by price bucket.
 
-# Contacts
-Feel free to reach out if you have any questions, feedback, or just want to say hello! We value your input and are here to help.
+This created a simplified representation of:
 
-- **Email:**
-  - Address: pvtoa@iscte-iul.pt
+```text
+where bids exist
+where asks exist
+how much liquidity exists
+how liquidity changes
+```
 
-- **GitHub Issues:**
-  - Address: https://github.com/badcoder-cloud/moonStreamProcess/issues
+The feature could then be compared across exchanges.
 
-- **Telegram:**
-  - Address: https://t.me/+OeAAF_1FpU01Mjg8
+---
 
-# Licence and Contributing
+### Open-interest features
 
-This project is open-source and free to fork. Feel free to use, modify, and distribute the code as you see fit. If you found it helpful, consider including my GitHub username (badcoder-cloud) in the forking process. I am extremely open to contributions, whether it be in the form of a new feature, improved infrastructure, or better documentation.
+Open-interest data was processed into:
 
-# Support Development
+- total OI;
+- OI increase;
+- OI decrease;
+- OI change;
+- OI volatility;
+- OI changes by price level.
 
-If you find this project helpful and would like to support its development, consider making a donation. Your contribution is greatly appreciated!
+Some of these features later turned out to be conceptually weak, especially the mapping of open-interest changes to observed market price.
 
-- **Bitcoin (BTC):**
-  - Address (Bitcoin Network): 31tRbakC3ebHsqWsgbEi3VHj9M98Eesmm1
+More on that in [[#Problems With the Features]].
 
-- **Tether (USDT):**
-  - Address (Polygon Network): 0xc2a77f3f3b0015f5f785b220451853c39a886894 
+---
 
-- **Ethereum (ETH):** 
-  - Address (Etherium Network): 0xb15d751c19ceacccfb8d6e6c9a06217e0b692856
+### Funding features
 
-*Exciting Updates Ahead!*
+Funding data from multiple perpetual exchanges was normalized and combined.
 
-Stay tuned for streaming wrappers, machine learning clustering pipelines and trading bots backed by reinforcement learning are on the horizon, bringing new possibilities and advancements to the project.
+The idea was to produce an approximate cross-exchange view of perpetual positioning pressure.
+
+---
+
+### Liquidation features
+
+Liquidations were grouped into:
+
+- long liquidations;
+- short liquidations;
+- total liquidations;
+- liquidation volume by price level.
+
+This was one of the cleaner feature groups because liquidation events are directly observable events from exchanges.
+
+---
+
+### Positioning ratios
+
+Where exchanges exposed positioning metrics, the system also collected things like:
+
+- top trader account ratios;
+- top trader position ratios;
+- global long/short ratios.
+
+These were later merged into broader market features.
+
+---
+
+### Experimental order-book features
+
+The system attempted to estimate:
+
+- removed liquidity;
+- reinforced liquidity;
+- duration of liquidity;
+- volatility of those changes.
+
+The intuition was interesting:
+
+```text
+liquidity appears
+    ↓
+stays briefly
+    ↓
+disappears
+```
+
+might contain information about order-book behavior.
+
+However, the implementation could not reliably distinguish:
+
+```text
+cancellation
+vs
+trade execution
+vs
+missed message
+vs
+snapshot replacement
+```
+
+so these features were only proxies.
+
+---
+
+## How the Processing Worked
+
+### Exchange normalization
+
+The exchange-specific normalization logic lived mainly in:
+
+```text
+StreamEngineBase/lookups.py
+```
+
+Different exchanges represent the same concepts differently.
+
+For example, quantity may be expressed in:
+
+```text
+BTC
+USDT
+USD
+contracts
+inverse contracts
+linear contracts
+```
+
+The adapters attempted to convert those values into a more comparable representation.
+
+They also handled:
+
+- timestamps;
+- trade side;
+- options expiration;
+- order-book format;
+- funding;
+- open interest.
+
+---
+
+### Stateful flow processing
+
+The main flow logic lived in:
+
+```text
+StreamEngineBase/flow.py
+```
+
+The system maintained state separately for:
+
+- books;
+- trades;
+- OI;
+- funding;
+- liquidations;
+- options;
+- positioning indicators.
+
+Each flow accumulated activity over a minute.
+
+A simplified representation looked like:
+
+```text
+second 0
+second 1
+second 2
+...
+second 59
+```
+
+When the second rolled back to zero, the previous minute became a completed snapshot.
+
+---
+
+### Cross-exchange synthesis
+
+The synthesis layer lived mainly in:
+
+```text
+StreamEngineBase/synthesis.py
+```
+
+It combined data from multiple exchanges.
+
+Conceptually:
+
+```text
+Binance
+OKX
+Bybit
+Deribit
+...
+    ↓
+normalize
+    ↓
+merge
+    ↓
+global BTC market representation
+```
+
+This produced aggregated:
+
+- order books;
+- trades;
+- OI;
+- funding;
+- liquidations;
+- positioning features.
+
+---
+
+## What Worked
+
+The project was not useless technically.
+
+Several parts were genuinely valuable.
+
+### Exchange adapters were the right abstraction
+
+Separating:
+
+```text
+exchange parsing
+```
+
+from:
+
+```text
+feature logic
+```
+
+was a good decision.
+
+It prevented every feature processor from needing to understand Binance, OKX, Bybit, Deribit, and every other exchange independently.
+
+---
+
+### It was a good research environment
+
+Python + NumPy + pandas made it extremely easy to test ideas.
+
+I could quickly try:
+
+```text
+different price buckets
+different feature formulas
+different exchange combinations
+different market representations
+```
+
+without building a large infrastructure system first.
+
+---
+
+### It exposed the actual hard problems
+
+Initially the interesting part seemed to be feature engineering.
+
+The project eventually showed that the difficult problems were actually:
+
+```text
+data correctness
+event ordering
+timestamp alignment
+replayability
+unit normalization
+backpressure
+persistence
+monitoring
+failure recovery
+```
+
+Those became the foundation for the next project.
+
+---
+
+## Why the Project Failed
+
+The biggest architectural mistake was:
+
+> **aggregating before preserving the raw event stream.**
+
+The system treated one-minute features as the main dataset.
+
+That was backwards.
+
+The correct order should have been:
+
+```text
+raw event
+    ↓
+persistent normalized event
+    ↓
+derived features
+```
+
+Instead, the project effectively did:
+
+```text
+raw event
+    ↓
+feature aggregation
+    ↓
+raw information lost
+```
+
+That made the system difficult to validate and impossible to fully replay.
+
+---
+
+## Problems With the Features
+
+Some generated features looked mathematically interesting but did not represent what I originally assumed they represented.
+
+### Order-book removals are ambiguous
+
+Suppose the displayed order book changes from:
+
+```text
+100 BTC
+```
+
+to:
+
+```text
+60 BTC
+```
+
+It is tempting to interpret:
+
+```text
+40 BTC removed
+```
+
+as:
+
+```text
+40 BTC canceled
+```
+
+But that is not necessarily true.
+
+Possible explanations include:
+
+- cancellation;
+- market execution;
+- missed WebSocket update;
+- reconnect;
+- snapshot reset;
+- exchange-specific book semantics.
+
+Without exact sequence-aware order-book reconstruction, the system cannot know the true reason.
+
+---
+
+### Open-interest changes do not reveal entry price
+
+Imagine:
+
+```text
+BTC price = $60,000
+OI change = +500 BTC
+```
+
+It is tempting to map:
+
+```text
++500 BTC
+```
+
+to the `$60,000` price bucket.
+
+But that does not mean those positions were opened at exactly `$60,000`.
+
+Open interest is an aggregate market value.
+
+The system knows:
+
+```text
+OI changed around this time
+```
+
+but not:
+
+```text
+these positions entered at this price
+```
+
+So these features were useful visually but dangerous if interpreted literally.
+
+---
+
+### Forward and backward filling can distort market state
+
+The prototype sometimes used:
+
+```python
+series.ffill().bfill()
+```
+
+for incomplete frames.
+
+Forward filling uses previously known information.
+
+Backward filling uses a future observation to fill an earlier missing value.
+
+For charts this can be convenient.
+
+For ML training, this can create look-ahead leakage.
+
+Example:
+
+```text
+12:00:01    missing
+12:00:02    missing
+12:00:03    value = 100
+```
+
+Backward filling can produce:
+
+```text
+12:00:01    100
+12:00:02    100
+12:00:03    100
+```
+
+But the value at `12:00:03` was not actually known at `12:00:01`.
+
+That is exactly the kind of subtle leakage that can make a model look much better in backtests than it really is.
+
+---
+
+## Why the ML Representation Was Weak
+
+This was the core reason the project stopped making sense as a serious ML data source.
+
+### Samples were not statistically comparable
+
+One bar may represent:
+
+```text
+50 trades
+```
+
+while another represents:
+
+```text
+50,000 trades
+```
+
+Yet the model receives both as:
+
+```text
+one observation
+```
+
+The amount of underlying information varies dramatically.
+
+---
+
+### Market regimes dominate the feature distribution
+
+Volatility and activity strongly affect almost every generated feature.
+
+For example:
+
+```text
+trade volume
+book movement
+OI changes
+liquidations
+volatility
+number of events
+```
+
+all expand massively during active regimes.
+
+A model may therefore learn:
+
+```text
+what volatility regime am I currently in?
+```
+
+rather than:
+
+```text
+what market structure predicts future behavior?
+```
+
+That can create excellent-looking validation results when train and test periods contain similar regimes.
+
+It then performs poorly when the market changes.
+
+---
+
+### Fixed-time bars hide event structure
+
+Suppose the market experiences:
+
+```text
+liquidation
+    ↓
+order-book collapse
+    ↓
+large market sell
+    ↓
+open-interest drop
+    ↓
+price rebound
+```
+
+That sequence matters.
+
+A one-minute aggregation may reduce it to:
+
+```text
+sell volume = X
+liquidations = Y
+OI change = Z
+close = P
+```
+
+The event ordering disappears.
+
+For many predictive problems, the order of events may be more informative than their total amount.
+
+---
+
+### Aggregation destroys optionality
+
+If raw events are stored, later research can generate:
+
+```text
+1-second bars
+10-second bars
+1-minute bars
+tick bars
+volume bars
+imbalance bars
+custom events
+```
+
+If only one-minute features are stored, none of those alternatives can be reconstructed properly.
+
+That was one of the most important architectural lessons.
+
+---
+
+## Why Python Became the Wrong Tool for the Hot Path
+
+Python itself was not the problem.
+
+Python was excellent for developing the idea.
+
+The problem appeared when the scope became:
+
+```text
+many exchanges
+×
+many symbols
+×
+many stream types
+×
+continuous ingestion
+```
+
+The system used pandas in ways that are expensive for high-frequency processing:
+
+- creating columns dynamically;
+- mutating individual rows;
+- copying DataFrames;
+- merging frames repeatedly;
+- sorting columns;
+- allocating many Python objects.
+
+This is fine for exploratory research.
+
+It is not ideal for a high-throughput market-data service.
+
+---
+
+### The problem shifted from analytics to systems engineering
+
+Eventually the important questions became:
+
+```text
+How do I process thousands of concurrent streams?
+
+How do I avoid unbounded queues?
+
+How do I detect dropped messages?
+
+How do I replay data after failure?
+
+How do I batch database writes?
+
+How do I monitor processing lag?
+
+How do I reconnect reliably?
+```
+
+Those are distributed-systems and streaming-infrastructure questions.
+
+That pushed me toward learning more about:
+
+- asynchronous programming;
+- backpressure;
+- queue design;
+- stream partitioning;
+- database batching;
+- observability;
+- distributed systems.
+
+Eventually that led me to Rust.
+
+---
+
+## What I Learned
+
+The project produced several architectural rules that I now consider much more important than the original feature set.
+
+### Raw data should be canonical
+
+Store the event first.
+
+For example:
+
+```text
+exchange
+symbol
+stream type
+exchange timestamp
+receive timestamp
+sequence number
+normalized fields
+raw payload
+```
+
+Everything else should be derived.
+
+---
+
+### Features should be disposable
+
+A feature is not the dataset.
+
+It is a transformation of the dataset.
+
+That means:
+
+```text
+raw events
+    ↓
+feature version 1
+
+raw events
+    ↓
+feature version 2
+
+raw events
+    ↓
+feature version 3
+```
+
+should all be possible without recollecting the market.
+
+---
+
+### Research and ingestion should be separate
+
+A cleaner design is:
+
+```text
+Exchange
+    ↓
+Streaming service
+    ↓
+Normalized raw events
+    ↓
+Database
+    ↓
+Research pipeline
+    ↓
+Features
+    ↓
+ML model
+```
+
+The ingestion system should not care what features the model needs.
+
+---
+
+### Event time matters
+
+Each event ideally needs multiple timestamps:
+
+```text
+exchange_event_time
+receive_time
+processing_time
+```
+
+These are not interchangeable.
+
+For high-frequency market data, this difference matters.
+
+---
+
+### Sequence numbers matter
+
+For order books especially, you need to know whether messages are missing.
+
+Without sequence validation:
+
+```text
+order book looks valid
+```
+
+does not necessarily mean:
+
+```text
+order book is correct
+```
+
+---
+
+### Backpressure is mandatory
+
+If input rate is greater than processing rate:
+
+```text
+input > output
+```
+
+then eventually:
+
+```text
+queue size → infinity
+```
+
+unless the system has bounded queues and explicit policies.
+
+A reliable streaming service needs to control this.
+
+---
+
+### Observability is part of correctness
+
+A process being alive does not mean it is healthy.
+
+A proper service needs metrics around:
+
+```text
+processing latency
+queue size
+database latency
+dropped events
+reconnect count
+message rate
+error rate
+active streams
+```
+
+That is why Prometheus and Grafana became part of the successor architecture.
+
+---
+
+## Better Architecture
+
+The architecture I eventually wanted became:
+
+```text
+Exchange WebSocket / HTTP
+            │
+            ▼
+      ingestion worker
+            │
+            ▼
+     normalized event
+            │
+            ▼
+ PostgreSQL / TimescaleDB
+            │
+            ▼
+     replayable pipeline
+            │
+            ▼
+     feature generation
+            │
+            ▼
+        ML research
+```
+
+The important difference is:
+
+```text
+store first
+aggregate later
+```
+
+not:
+
+```text
+aggregate first
+lose the original data
+```
+
+---
+
+### Language split
+
+The eventual division of responsibilities became clearer:
+
+```text
+Rust
+    → ingestion
+    → normalization
+    → concurrency
+    → persistence
+    → runtime services
+
+Python
+    → analysis
+    → feature engineering
+    → statistics
+    → notebooks
+    → machine learning
+```
+
+Python did not become useless.
+
+Its role simply moved to the part of the system where it is strongest.
+
+---
+
+## Successor Project
+
+The practical successor is:
+
+`mini-fintickstreams`
+
+That project is written in Rust and follows a very different design philosophy.
+
+Instead of immediately converting market data into fixed bars, it focuses on:
+
+```text
+collect
+normalize
+persist
+observe
+replay
+```
+
+The newer architecture includes work around:
+
+- Rust;
+- Tokio;
+- asynchronous exchange workers;
+- typed market events;
+- PostgreSQL;
+- TimescaleDB;
+- batching;
+- backpressure;
+- rate limiting;
+- reconnect handling;
+- Prometheus;
+- Grafana;
+- Redis Streams;
+- Kubernetes.
+
+Conceptually:
+
+```text
+Exchange
+    ↓
+Rust / Tokio
+    ↓
+typed normalized event
+    ↓
+TimescaleDB
+    ↓
+research dataset
+```
+
+This project was basically the experiment that made that architecture necessary.
+
+---
+
+## Repository Structure
+
+### Exchange normalization
+
+```text
+StreamEngineBase/lookups.py
+```
+
+Contains exchange-specific parsing, unit conversion, timestamp conversion, and normalization logic.
+
+---
+
+### Stream processing
+
+```text
+StreamEngineBase/flow.py
+```
+
+Contains the stateful processors for:
+
+- order books;
+- trades;
+- open interest;
+- funding;
+- liquidations;
+- options;
+- market indicators.
+
+---
+
+### Cross-exchange synthesis
+
+```text
+StreamEngineBase/synthesis.py
+```
+
+Combines data coming from individual exchange flows into unified market representations.
+
+---
+
+### Bitcoin spot and perpetual configuration
+
+```text
+StreamEngine/spotperp/btc.py
+```
+
+Defines the exchange-specific Bitcoin flows.
+
+---
+
+### Bitcoin options configuration
+
+```text
+StreamEngine/option/btc.py
+```
+
+Contains the options-specific processing setup.
+
+---
+
+### Main processor
+
+```text
+StreamEngine/synthHub.py
+```
+
+Connects the individual processors and exposes the flattened combined feature dictionary.
+
+---
+
+### Example notebook
+
+```text
+examples/btcSynth.ipynb
+```
+
+Used for manually testing and inspecting the generated market features.
+
+---
+
+### Recorded sample data
+
+```text
+examples/data
+```
+
+Contains example exchange payloads used during development.
+
+---
+
+## Current Status
+
+The code is intentionally left unchanged.
+
+I do not plan to rewrite this implementation into production-quality infrastructure because that would effectively mean rebuilding the whole system around a different architecture.
+
+The repository is more useful as a record of:
+
+- what I originally tried;
+- how the feature system worked;
+- which assumptions failed;
+- why fixed-time bars were problematic for ML;
+- where data leakage could appear;
+- why raw event storage matters;
+- why high-throughput ingestion needs different infrastructure;
+- how the project eventually led into distributed computing and Rust.
+
+The project failed at its original goal.
+
+That failure was useful.
+
+It changed the problem from:
+
+```text
+How do I create more market features?
+```
+
+into:
+
+```text
+How do I build a reliable market-data system where features can be regenerated correctly?
+```
+
+That turned out to be the much more important question.
