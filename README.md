@@ -17,24 +17,23 @@
 
 ## Quick Navigation
 
-- [[#What This Project Was]]
-- [[#The Main Problem With Fixed-Time Bars]]
-- [[#What the System Produced]]
-- [[#Architecture]]
-- [[#Technology Used]]
-- [[#Feature Engineering]]
-- [[#How the Processing Worked]]
-- [[#What Worked]]
-- [[#Why the Project Failed]]
-- [[#Problems With the Features]]
-- [[#Why the ML Representation Was Weak]]
-- [[#Why Python Became the Wrong Tool for the Hot Path]]
-- [[#What I Learned]]
-- [[#Better Architecture]]
-- [[#Successor Project]]
-- [[#Repository Structure]]
-- [[#Current Status]]
-
+- [What This Project Was](#what-this-project-was)
+- [The Main Problem With Fixed-Time Bars](#the-main-problem-with-fixed-time-bars)
+- [What the System Produced](#what-the-system-produced)
+- [Architecture](#architecture)
+- [Technology Used](#technology-used)
+- [Feature Engineering](#feature-engineering)
+- [How the Processing Worked](#how-the-processing-worked)
+- [What Worked](#what-worked)
+- [Why the Project Failed](#why-the-project-failed)
+- [Problems With the Features](#problems-with-the-features)
+- [Why the ML Representation Was Weak](#why-the-ml-representation-was-weak)
+- [Why Python Became the Wrong Tool for the Hot Path](#why-python-became-the-wrong-tool-for-the-hot-path)
+- [What I Learned](#what-i-learned)
+- [Better Architecture](#better-architecture)
+- [Successor Project](#successor-project)
+- [Repository Structure](#repository-structure)
+- [Current Status](#current-status)
 ---
 
 ## What This Project Was
